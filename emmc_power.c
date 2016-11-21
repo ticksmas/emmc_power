@@ -14,7 +14,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
 #include "emmc_power.h"
+#include <pthread.h>
 
 /* The authentication method is basic. So a encoded base64 string is required.
    This string contains user:password. So if any of them was changed, you'll need
@@ -23,6 +25,14 @@
 static const char *hostname = "10.15.36.9";
 static const char *path = "/sistema.cgi?lermc=0,26";
 static const char *authToken = "YWRtaW46YWRtaW4=";
+static char *data;
+
+static pthread_t tid;
+static const long time_stamp = 100000000L;
+static int sensor = 1;
+static volatile double avg = 0;
+static unsigned count = 0;
+static unsigned live;
 
 void buildSocket(int *socket_file_descriptor) {
     struct protoent *protoent;
@@ -58,7 +68,7 @@ void buildAddress(struct sockaddr_in *myaddr) {
 }
 
 void connectAndRead(int *socket_file_descriptor, struct sockaddr_in *myaddr, 
-                      char request[MAX_REQUEST_LEN], int request_len, char *data) {
+                      char request[MAX_REQUEST_LEN], int request_len) {
     int i;
     ssize_t nbytes_total, nbytes_last;
     char buffer[BUFSIZ];
@@ -96,20 +106,20 @@ void connectAndRead(int *socket_file_descriptor, struct sockaddr_in *myaddr,
         perror("read");
         exit(EXIT_FAILURE);
     } else {
-        readData = strstr(response, "\r\n\r\n");
-        strncpy(data, readData + 5, strlen(readData) - 6);
+        readData = strstr(response, "[");
+        data = malloc(strlen(readData));
+        strncpy(data, readData+1, strlen(readData) - 1);
     }
 }
 
 
-static double emmc_power_get(int sensor) {
+static double emmc_power_get(void) {
     int socket_file_descriptor, request_len;
     
     struct sockaddr_in myaddr;
     emmc_data_t ed[3];
     emmc_totals_t et;
     
-    char *data;
     char request[MAX_REQUEST_LEN];
 
     request_len = snprintf(request, MAX_REQUEST_LEN,"GET %s HTTP/1.1\r\n"
@@ -124,10 +134,10 @@ static double emmc_power_get(int sensor) {
 
     buildSocket(&socket_file_descriptor);
     buildAddress(&myaddr);
-    connectAndRead(&socket_file_descriptor, &myaddr, request, request_len, data);
+    connectAndRead(&socket_file_descriptor, &myaddr, request, request_len);
     close(socket_file_descriptor);
 
-    sscanf(data, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+    sscanf(data, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
        &ed[0].voltage,     &ed[0].current,   &ed[0].apparentPower, &ed[0].realPower,
        &ed[0].powerFactor, &ed[0].frequency, &ed[0].reactivePower,
 
@@ -135,16 +145,44 @@ static double emmc_power_get(int sensor) {
        &ed[1].powerFactor, &ed[1].frequency, &ed[1].reactivePower,
 
        &ed[2].voltage,     &ed[2].current,   &ed[2].apparentPower, &ed[2].realPower,
-       &ed[2].powerFactor, &ed[2].frequency, &ed[2].reactivePower,
-
-       &et.current, &et.realPower, &et.powerFactor, &et.none, &et.averageVoltage);
+       &ed[2].powerFactor, &ed[2].frequency, &ed[2].reactivePower);
 
     return (ed[sensor].realPower);
 }
 
-int main(int argc, char** argv) {
-    
-    printf("Power: %.6f \n",emmc_power_get(0));
+static void *emmc_power_listen(void *unused)
+{
+    struct timespec ts;
+    ((void)unused);
+    ts.tv_sec = 0;
+    ts.tv_nsec = time_stamp;
 
-    exit(EXIT_SUCCESS);
+    do
+    {
+        avg += emmc_power_get();
+        count++;
+    
+        nanosleep(&ts, NULL);
+    } while (live);
+    
+    avg /= count;
+    
+    return (NULL);
+}
+
+void emmc_power_init(int pSensor)
+{
+    live = 1;
+    sensor = pSensor;
+    pthread_create(&tid, NULL, emmc_power_listen, NULL);
+}
+
+/*
+ * Terminates power measurement utility.
+ */
+double emmc_power_end(void)
+{
+    live = 0;
+    pthread_join(tid, NULL);
+    return (avg);
 }
